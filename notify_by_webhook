@@ -1,0 +1,179 @@
+#!/usr/bin/env perl
+#
+#   notify_by_webhook
+#
+#   A perl based monitoring plugin to send notifications to generic webhook URLs.
+#   Use the parameters to override the http method and content type.
+#   The code is based on the Opsview Slack notification script.
+#
+#   DISCLAIMER
+#   You are responsible for your actions. Nobody else is. 
+#   Be sure to test the script in a controlled environment prior to anywhere else.
+#
+
+# SYNTAX:
+my $usage = qq{
+   notify_by_webhook
+    (?) 1981-2099 . No rights reserved
+
+Usage: notify_by_webhook [-h] [-n] [-d] [-m] [-u] [-t]
+
+Where:
+  -h - this help text
+  -n - do not send acknowledgements
+  -d - debug mode, prints errors to stderr and log file
+  -m - override the status message, uses host or service check result
+  -p - override the HTTP METHOD, uses POST by default
+  -t - override the Content-Type header, uses application/json default
+  -u - any generic webhook url, will override any Opsview notification variable variables
+};
+
+use strict;
+use warnings;
+use lib qw( /opt/opsview/monitoringscripts/lib /opt/opsview/perl/lib/perl5 );
+use Getopt::Long;
+use HTTP::Request;
+use JSON;
+use HTTP::Request::Common qw(POST);
+use Opsview::Config::Notifications;
+use HTTP::Status qw(is_client_error);
+use LWP::UserAgent;
+
+# Vars for message
+# Colors only work if HTML can be parsed.
+#my %color = ( 'OK' => '008000', 'WARNING' => 'ffff00', 'UNKNOWN' => '808080','CRITICAL' => 'ff0000',
+#              'UP' => '008000', 'DOWN' => 'ff0000', 'UNREACHABLE' => 'ff8700');
+
+my $http_method = '';
+my $content_type = '';
+my $webhook = "";
+my $message  = "";
+my $result = "$message";
+my $json = "";
+#my $webhook = $notification_vars->{WEBHOOK_URL};
+my ( $help_mode, $debug_mode, $no_ack );
+
+$debug_mode = $no_ack = $help_mode = 1;
+
+# Get the arguments, print usage and exit 1 if unknown argument or argument with no value
+unless (
+    GetOptions(
+        'h'   => \$help_mode,
+        'd'   => \$debug_mode,
+        'n'   => \$no_ack,
+        'm=s' => \$message,
+        'u=s' => \$webhook,
+        'p=s' => \$http_method,
+        't=s' => \$content_type,
+    )
+  )
+{
+    print STDERR $usage;
+    exit 1;
+}
+
+my $notification_vars =
+  Opsview::Config::Notifications->notification_variables(
+    'com.opsview.notificationmethods.webhook'
+  );
+
+# Run the subroutines for the options.
+if ($help_mode) {
+
+    # Help
+    print $usage;
+}
+else {
+    prepare_payload();
+    send_webhook_payload();
+}
+
+# To do: Subroutines needs some work still.
+######
+#sub prepare_payload {
+
+# Determine host check or a service check.
+if (not length($ENV{NAGIOS_SERVICESTATE})) {
+    # Ignore Acknowledgements and exit 0
+    if ( $no_ack && $ENV{NAGIOS_NOTIFICATIONTYPE} eq 'ACKNOWLEDGEMENT' ) {
+        exit 0;
+    }
+    else {
+    # Event is host notification.
+    #$ENV{NAGIOS_SERVICEDESC} = "host status";
+    #$ENV{NAGIOS_SERVICESTATE} = $ENV{NAGIOS_HOSTSTATE};
+    $ENV{NAGIOS_SERVICEOUTPUT} = $ENV{NAGIOS_HOSTOUTPUT};
+    }
+}
+
+if  ($message eq '') {
+# In case -m 'custom string' parameter was not provided to the script.
+  $message = "$ENV{NAGIOS_SERVICEOUTPUT}";
+}
+
+# Define a JSON that suits your needs and make sure the generic webhook eats it.
+$result = "{\"jsonObject\": \"$message\"}";
+$json = $result;
+######
+#}
+
+#
+# Make the request
+#
+# To do: Using subroutines still needs some work.
+######
+#sub send_webhook_payload {
+    require LWP::UserAgent;
+
+    my $ua = LWP::UserAgent->new;
+    $ua->timeout(5);
+
+    if ( $http_method ne '' ) {
+    my $req = HTTP::Request->new($http_method, $webhook);
+    } else {
+    my $req = HTTP::Request->new('POST', $webhook);
+    }
+    # Use the -t parameter to override Content-Type
+    if ($content_type ne '') {
+    $req->header('Content-Type' => '$content_type');
+    } else {
+    $req->header('Content-Type' => 'application/json');
+    }
+        
+    $req->content($json);
+    my $s = $req->as_string;
+    print STDERR "Request:\n$s\n";
+
+    my $res = $ua->request($req);
+    $s = $res->as_string;
+    print STDERR "Response:\n$s\n";
+
+    my $err_line = $res->is_success ? '' : $res->status_line;
+    my $err_message = '';
+    if ($err_line) {
+        $json = decode_json( $res->content );
+        $err_message = $json->{error}{message};
+    }
+
+    if ($debug_mode) {
+    #if ($err_line) {
+        $err_line
+          ? print "Message not sent: $err_line: $err_message\n"
+          : print "Message sent\n";
+    }
+
+    if ($err_line and open my $fh, $s,'>>','/var/log/opsview/notify_by_webhook.log') {
+        my @t = localtime;
+        my $time = sprintf '%d-%02d-%02d %02d:%02d:%02d', 1900 + $t[5],
+          1 + $t[4], $t[3], $t[2], $t[1], $t[0];
+        if ( not $err_line ) {
+            print $fh "$time ${\( $res->code )} $message\n$s\n";
+        }
+        else {
+            print $fh
+            "$time ${\( $res->code )} $message\n  $err_line: $err_message\n$s\n";
+        }
+    }
+    exit !$res->is_success;
+######
+#}
