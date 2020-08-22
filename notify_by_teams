@@ -1,0 +1,216 @@
+#!/usr/bin/env perl
+#
+#   notify_by_teams
+#
+#   A perl based monitoring plugin to send notifications to Microsoft Teams.
+#
+#   DISCLAIMER
+#   You are responsible for your actions. Nobody else is.
+#   Be sure to test the script in a controlled environment prior to anywhere else.
+#
+
+
+# SYNTAX:
+my $usage = qq{
+   notify_by_teams
+   (?) 1981-2099 . No rights reserved
+
+Usage: notify_by_teams [-h] [-n] [-d] [-m] [-u]
+
+Where:
+  -h - this help text
+  -n - do not send acknowledgements
+  -d - debug mode, prints errors to stderr and log file
+  -m - message to send, will override the Opsview notification data if specified
+  -u - webhook url to send the notification to, will override the Opsview notification variables if specified
+};
+
+use strict;
+use warnings;
+use lib qw( /opt/opsview/monitoringscripts/lib /opt/opsview/perl/lib/perl5 );
+use Getopt::Long;
+use HTTP::Request;
+use JSON;
+use HTTP::Request::Common qw(POST);
+use Opsview::Config::Notifications;
+use HTTP::Status qw(is_client_error);
+use LWP::UserAgent;
+
+my %event;
+my %nagios;
+my %color = ( 'OK' => '008000', 'WARNING' => 'ffff00', 'UNKNOWN' => '808080','CRITICAL' => 'ff0000',
+              'UP' => '008000', 'DOWN' => 'ff0000', 'UNREACHABLE' => 'ff8700');
+my @sections;
+my @actions;
+my @targets;
+# Vars for message
+my $message  = "";
+my $webhook = "$ENV{TEAMS_WEBHOOK_URL};"
+my $opsview_url = "";
+my ( $help_mode, $debug_mode, $no_ack );
+
+$debug_mode = $no_ack = $help_mode = 1;
+
+#$event{'title'} = "Notification";
+#$event{'@type'} = "MessageCard";
+#$event{'@context'} = "https://schema.org/extensions";
+#$ENV{NAGIOS_HOSTOUTPUT} = "not defined";
+# Get the arguments, print usage and exit 1 if unknown argument or argument with no value
+unless (
+    GetOptions(
+        'h'   => \$help_mode,
+        'd'   => \$debug_mode,
+        'n'   => \$no_ack,
+        'm=s' => \$message,
+        'u=s' => \$webhook,
+    )
+  )
+{
+    print STDERR $usage;
+    exit 1;
+}
+
+my $notification_vars =
+  Opsview::Config::Notifications->notification_variables(
+    'com.opsview.notificationmethods.teams'
+  );
+
+my $icon_to_show = "";
+my $emoji_icon   = {
+    CRITICAL    => ":S",
+    WARNING     => ":warning:",
+    OK          => ":white_check_mark:",
+    UNKNOWN     => ":question:",
+    RECOVERY    => ":white_medium_square:",
+    OPERATIONAL => ":white_check_mark:",
+    IMPACTED    => ":warning:",
+    FAILED      => ":exclamation:",
+    DOWNTIME    => ":warning:",
+    OFFLINE     => ":exclamation:"
+};
+
+# Run the subroutines for the options.
+if ($help_mode) {
+
+    # Help
+    print $usage;
+}
+#else {
+#    prepare_message();
+#    send_teams_message();
+#}
+
+# Takes command line arguments for the message details.
+#
+# Using subroutines needs some work still.
+#sub prepare_message {
+
+
+#
+# Format message card
+#
+
+if (not length($ENV{NAGIOS_SERVICESTATE})) {
+    # Acknowledgement, ignore and exit 0
+    if ( $no_ack && $ENV{NAGIOS_NOTIFICATIONTYPE} eq 'ACKNOWLEDGEMENT' ) {
+        exit 0;
+    }
+    else {
+    # if service state env is not defnined or empty, event is host notification.
+    $ENV{NAGIOS_SERVICEDESC} = "host status";
+    $ENV{NAGIOS_SERVICESTATE} = $ENV{NAGIOS_HOSTSTATE};
+    $ENV{NAGIOS_SERVICEOUTPUT} = $ENV{NAGIOS_HOSTOUTPUT};
+    }
+}
+$event{'title'} = "Opsview Notification";
+$event{'@type'} = "MessageCard";
+$event{'@context'} = "https://schema.org/extensions";
+$event{'themeColor'} = $color{"$ENV{NAGIOS_SERVICESTATE}"};
+$event{'title'} = "$ENV{NAGIOS_NOTIFICATIONTYPE}: $ENV{NAGIOS_HOSTNAME}-$ENV{NAGIOS_SERVICEDESC} is $ENV{NAGIOS_SERVICESTATE}";
+$event{'summary'} = $event{'title'};
+my @facts = ({
+    'name' => "Host:",
+    'value' => "$ENV{NAGIOS_HOSTNAME}"
+   },{
+    'name' => "Details:",
+    'value' => "$ENV{NAGIOS_SERVICEOUTPUT}"
+});
+my %section = ( 'facts' => \@facts, 'text' => "Host Output: $ENV{NAGIOS_HOSTOUTPUT}" );
+push(@sections, \%section);
+$event{'sections'} = \@sections;
+
+if ($opsview_url ne '') {
+  my %target = (
+        'os' => 'default',
+        'uri' => "https://opsview.example.com/monitoring/#\!?autoSelectHost=$ENV{'NAGIOS_HOSTNAME'}"
+  );
+  push(@targets, \%target);
+  my %link = (
+      '@type' => 'OpenUri',
+      'name' => 'More information',
+      'targets' => \@targets
+  );
+  push(@actions, \%link);
+  $event{'potentialAction'} = \@actions;
+}
+my $payload = encode_json \%event;
+
+
+#
+# Make the request
+#
+
+# Using subroutines still needs some work.
+#sub send_teams_message {
+    require LWP::UserAgent;
+
+    my $ua = LWP::UserAgent->new;
+    $ua->timeout(5);
+
+    my $req = HTTP::Request->new('POST', $webhook);
+    $req->header('Content-Type' => 'application/json');
+    $req->content($payload);
+
+    my $s = $req->as_string;
+    print STDERR "Request:\n$s\n";
+
+    my $res = $ua->request($req);
+    $s = $res->as_string;
+    print STDERR "Response:\n$s\n";
+
+    my $err_line = $res->is_success ? '' : $res->status_line;
+    my $err_message = '';
+    if ($err_line) {
+        $json = decode_json( $res->content );
+        $err_message = $json->{error}{message};
+    }
+
+    if ($debug_mode) {
+        $err_line
+          ? print "Message not sent: $err_line: $err_message\n"
+          : print "Message sent\n";
+    }
+
+    if (
+        (
+               $debug_mode
+            or $err_line
+        )
+        and open my $fh, $s,
+        '>>',
+        '/var/log/opsview/notify_by_teams.log'
+      )
+    {
+        my @t = localtime;
+        my $time = sprintf '%d-%02d-%02d %02d:%02d:%02d', 1900 + $t[5],
+          1 + $t[4], $t[3], $t[2], $t[1], $t[0];
+        if ( not $err_line ) {
+            print $fh "$time ${\( $res->code )} $message\n$s\n";
+        }
+        else {
+            print $fh
+            "$time ${\( $res->code )} $message\n  $err_line: $err_message\n$s\n";
+        }
+    }
+    exit !$res->is_success;
+#}
